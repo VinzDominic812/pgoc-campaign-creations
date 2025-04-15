@@ -70,27 +70,34 @@ def get_cpp_from_insights(ad_account_id, access_token, level, cpp_date_start, cp
     Returns a dictionary mapping campaign_id or adset_id to CPP values.
     """
     cpp_data = {}
-    url = (f"{FACEBOOK_GRAPH_URL}/act_{ad_account_id}/insights"
-           f"?level={level}&fields={level}_id,actions,spend"
-           f"&time_range[since]={cpp_date_start}&time_range[until]={cpp_date_end}")
 
-    while url:
-        response_data = fetch_facebook_data(url, access_token)
-        if "error" in response_data:
-            logging.error(f"Error fetching {level} insights: {response_data['error'].get('message', 'Unknown error')}")
-            break
+    
+    # Get Number of Initiated Checkouts with Campaigns:
+    checkout_url = f"{FACEBOOK_GRAPH_URL}/act_{ad_account_id}/insights?level={level}&fields={level}_id,adset_name,spend,actions&action_breakdowns=action_type&time_range[since]={cpp_date_start}&time_range[until]={cpp_date_end}&access_token={access_token}"
+    response = requests.get(checkout_url).json()
 
-        for item in response_data.get("data", []):
-            entity_id = item.get(f"{level}_id")
-            spend = float(item.get("spend", 0))
+    # List of relevant action types for initiated checkout
+    checkout_types = {
+        "omni_initiated_checkout",
+    }
 
-            actions = {action["action_type"]: float(action["value"]) for action in item.get("actions", [])}
-            initiate_checkout_value = actions.get("onsite_conversion.initiate_checkout", actions.get("omni_initiated_checkout", 0))
+    # Parse and calculate initiated checkouts per campaign/adsets
+    for campaign in response.get("data", []):
+        campaign_id = campaign.get(f"{level}_id")
+        campaign_spend = float(campaign.get("spend", 0))
+        total_campaign_checkouts = 0
 
-            cpp_data[entity_id] = spend / initiate_checkout_value if initiate_checkout_value > 0 else 0
+        # Sum all initiated checkouts for the current campaign
+        for action in campaign.get("actions", []):
+            if action["action_type"] in checkout_types:
+                total_campaign_checkouts += int(action["value"])
 
-        url = response_data.get("paging", {}).get("next")  # Pagination
-
+        # print(f"Total Spend: ${campaign_spend:.2f}")
+        # print(f"Total Initiated Checkouts: {total_campaign_checkouts}")
+        # print(f"CPP:", float(campaign_spend/total_campaign_checkouts) if total_campaign_checkouts > 0 else 0)
+        # print("\n")
+        cpp_data[campaign_id] = float(campaign_spend/total_campaign_checkouts) if total_campaign_checkouts > 0 else 0
+        
     return cpp_data
 
 @shared_task
