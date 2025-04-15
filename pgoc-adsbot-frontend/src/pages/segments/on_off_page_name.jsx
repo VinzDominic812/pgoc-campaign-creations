@@ -1,12 +1,16 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Box, Typography } from "@mui/material";
+import { Box, Typography, Tooltip } from "@mui/material";
 import WidgetCard from "../components/widget_card.jsx";
 import DynamicTable from "../components/dynamic_table.jsx";
 import notify from "../components/toast.jsx";
 import CustomButton from "../components/buttons.jsx";
 import SpaceBg from "../../assets/space-bg.png";
 import Papa from "papaparse";
-import { getUserData } from "../../services/user_data.js";
+import {
+  getUserData,
+  encryptData,
+  decryptData,
+} from "../../services/user_data.js";
 
 // ICONS
 import ExportIcon from "@mui/icons-material/FileUpload";
@@ -14,6 +18,9 @@ import CloudExportIcon from "@mui/icons-material/BackupRounded";
 import RunIcon from "@mui/icons-material/PlayCircle";
 import DeleteIcon from "@mui/icons-material/Delete";
 import DownloadIcon from "@mui/icons-material/FileDownload";
+import CheckIcon from "@mui/icons-material/Check";
+import CancelIcon from "@mui/icons-material/Cancel";
+
 import PageNameTerminal from "../widgets/on_off_pagename/on_off_pagename_terminal.jsx";
 import { EventSource } from "extended-eventsource";
 import Cookies from "js-cookie";
@@ -37,258 +44,241 @@ const apiUrl = import.meta.env.VITE_API_URL;
 const PageOnOFFPage = () => {
   const headers = [
     "ad_account_id",
+    "ad_account_status",
     "access_token",
+    "access_token_status",
     "page_name",
     "on_off",
     "status",
   ];
-  // Retrieve persisted state from cookies
-  const getPersistedState = (key, defaultValue) => {
-    const savedData = Cookies.get(key);
-    return savedData ? JSON.parse(savedData) : defaultValue;
-  };
 
-  const [tablePageNameData, setTablePageNameData] = useState(() =>
-    getPersistedState("tablePageNameData", [])
-  );
   const [selectedRows, setSelectedRows] = useState(new Map());
   const [selectedData, setSelectedData] = useState([]); // Store selected data
   const [messages, setMessages] = useState([]); // Ensure it's an array
   const fileInputRef = useRef(null);
   const eventSourceRef = useRef(null);
 
-  // Persist data in cookies whenever state changes
+  // Retrieve persisted state from cookies
+  const getPersistedState = (key, defaultValue) => {
+    try {
+      const encryptData = localStorage.getItem(key);
+      if (!encryptData) return defaultValue;
+      const decryptedData = decryptData(encryptData);
+      if (!decryptedData) return defaultValue;
+
+      if (Array.isArray(decryptedData)) {
+        return decryptedData;
+      }
+
+      if (typeof decryptedData === "string") {
+        try {
+          const parsed = JSON.parse(decryptedData);
+          return Array.isArray(parsed) ? parsed : defaultValue;
+        } catch {
+          return defaultValue;
+        }
+      }
+      return defaultValue;
+    } catch (error) {
+      console.error(`Error loading ${key}:`, error);
+      return defaultValue;
+    }
+  };
+
+  const [tablePageNameData, setTablePageNameData] = useState(() => {
+    const data = getPersistedState("tablePageNameData", []);
+    return Array.isArray(data) ? data : [];
+  });
+
   useEffect(() => {
-    Cookies.set("tablePageNameData", JSON.stringify(tablePageNameData), { expires: 1 }); // Expires in 1 day
+    try {
+      const dataToStore = Array.isArray(tablePageNameData)
+        ? tablePageNameData
+        : [];
+      const encryptedData = encryptData(dataToStore);
+      localStorage.setItem("tablePageNameData", encryptedData);
+    } catch (error) {
+      console.error("Error Saving table data:", error);
+    }
   }, [tablePageNameData]);
 
   useEffect(() => {
-    Cookies.set("messages", JSON.stringify(messages), { expires: 1 });
+    try {
+      const encryptedMessages = encryptData(messages);
+      localStorage.setItem("pagenameMessages", encryptedMessages);
+    } catch (error) {
+      console.error("Error saving messages:", error);
+      notify("Failed to save messages", "error");
+    }
   }, [messages]);
+
+  const handleSelectedDataChange = (selectedRows) => {
+    setSelectedData(selectedRows);
+  };
 
   const addMessage = (newMessages) => {
     setMessages((prevMessages) => {
-      // Ensure prevMessages is always an array (fallback to empty array)
       const messagesArray = Array.isArray(prevMessages) ? prevMessages : [];
 
-      // Use a Map to store unique messages
-      const uniqueMessages = new Map(
-        [...messagesArray, ...newMessages].map((msg) => [
-          JSON.stringify(msg),
-          msg,
-        ])
-      );
+      // Ensure newMessages is a single string, not split into characters
+      const newMessageText = Array.isArray(newMessages)
+        ? newMessages.join(" ")
+        : newMessages;
 
-      return Array.from(uniqueMessages.values()); // Convert back to array
+      // Avoid duplicates while maintaining the order
+      const uniqueMessages = new Set([...messagesArray, newMessageText]);
+
+      return Array.from(uniqueMessages);
     });
   };
 
-  // Validate CSV Headers
-  const validateCSVHeaders = (fileHeaders) =>
-    REQUIRED_HEADERS.every((header) => fileHeaders.includes(header));
+  useEffect(() => {
+    const { id: user_id } = getUserData();
+    const eventSourceUrl = `${apiUrl}/api/v1/messageevents-pagename?keys=${user_id}-key`;
 
-  const handleRunCampaigns = async () => {
-    if (tablePageNameData.length === 0) {
-      addMessage([`[${getCurrentTime()}] ❌ No campaigns to process.`]);
-      return;
+    if (eventSourceRef.current) {
+        eventSourceRef.current.close();
     }
 
-    const { id: user_id } = getUserData();
-    const delayMs = 3000; // 3 seconds delay
-
-    // Convert table data to request format
-    const requestData = tablePageNameData.map((entry) => ({
-      ad_account_id: entry.ad_account_id,
-      user_id,
-      access_token: entry.access_token,
-      schedule_data: [
-        {
-          page_name: entry.page_name,
-          on_off: entry.on_off,
+    const eventSource = new EventSource(eventSourceUrl, {
+        headers: {
+            "ngrok-skip-browser-warning": "true",
+            skip_zrok_interstitial: "true",
         },
-      ],
-    }));
+        retry: 1500,
+    });
 
-    // Process campaigns sequentially with a delay
-    for (const [index, data] of requestData.entries()) {
-      const { ad_account_id, schedule_data } = data;
-      const on_off = schedule_data[0].on_off; // Extract ON/OFF status
+    eventSource.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            if (data && data.data && data.data.message) {
+                const messageText = data.data.message[0];
+                addMessage(data.data.message);
 
-      addMessage([
-        `[${getCurrentTime()}] ⏳ Processing Ad Account ${ad_account_id} (${on_off.toUpperCase()})`,
-      ]);
+                // ✅ Match "Fetching Campaign Data for PAGE_NAME (ON|OFF)"
+                const fetchingMatch = messageText.match(
+                    /\[(.*?)\] Fetching Campaign Data for (.*?) \((ON|OFF)\)/
+                );
 
-      try {
-        const response = await fetch(
-          `${apiUrl}/api/v1/OnOff/pagename`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              skip_zrok_interstitial: "true",
-            },
-            body: JSON.stringify(data),
-          }
-        );
+                if (fetchingMatch) {
+                    const pageNames = fetchingMatch[2].split(',').map(name => name.trim());
+                    const onOffStatus = fetchingMatch[3];
 
-        if (!response.ok) {
-          throw new Error(`Request failed for row ${index + 1}`);
-        }
-
-        // ✅ Update status for the successfully processed campaign
-        setTablePageNameData((prevData) =>
-          prevData.map((entry) =>
-            entry.ad_account_id === ad_account_id && entry.on_off === on_off
-              ? {
-                  ...entry,
-                  status: `Request Sent ✅ (${on_off.toUpperCase()})`,
+                    pageNames.forEach((pageName) => {
+                        setTablePageNameData((prevData) =>
+                            prevData.map((entry) =>
+                                entry.page_name === pageName && entry.on_off === onOffStatus
+                                    ? { ...entry, status: "Fetching ⏳" }
+                                    : entry
+                            )
+                        );
+                    });
                 }
-              : entry
-          )
-        );
 
-        addMessage([
-          `[${getCurrentTime()}] ✅ Ad Account ${ad_account_id} (${on_off.toUpperCase()}) processed successfully`,
-        ]);
-      } catch (error) {
-        addMessage([
-          `[${getCurrentTime()}] ❌ Error processing campaign ${
-            index + 1
-          } for Ad Account ${ad_account_id} (${on_off.toUpperCase()}): ${
-            error.message
-          }`,
-        ]);
+                // ✅ Match success message for campaign updates completed
+                const successMatch = messageText.match(
+                    /\[(.*?)\] Campaign updates completed for (.*?) \((ON|OFF)\)/
+                );
 
-        // ❌ Update status for failed campaigns
-        setTablePageNameData((prevData) =>
-          prevData.map((entry) =>
-            entry.ad_account_id === ad_account_id && entry.on_off === on_off
-              ? { ...entry, status: `Failed ❌ (${on_off.toUpperCase()})` }
-              : entry
-          )
-        );
+                if (successMatch) {
+                    const pageNames = successMatch[2].split(',').map(name => name.trim());
+                    const onOffStatus = successMatch[3];
+
+                    pageNames.forEach((pageName) => {
+                        setTablePageNameData((prevData) =>
+                            prevData.map((entry) =>
+                                entry.page_name === pageName && entry.on_off === onOffStatus
+                                    ? { ...entry, status: `Success ✅ (${onOffStatus})` }
+                                    : entry
+                            )
+                        );
+                    });
+                }
+
+                // ✅ Match error message for campaign fetch failure
+                const errorMatch = messageText.match(
+                    /\[(.*?)\] ❌ Error fetching campaigns for (.*?) \((ON|OFF)\): (.*)/
+                );
+
+                if (errorMatch) {
+                    const pageNames = errorMatch[2].split(',').map(name => name.trim());
+                    const onOffStatus = errorMatch[3];
+
+                    pageNames.forEach((pageName) => {
+                        console.log(`❌ Error detected for ${pageName} (${onOffStatus})`);
+
+                        setTablePageNameData((prevData) =>
+                            prevData.map((entry) =>
+                                entry.page_name === pageName && entry.on_off === onOffStatus
+                                    ? { ...entry, status: `Failed ❌ (${onOffStatus})` }
+                                    : entry
+                            )
+                        );
+                    });
+                }
+
+                // ✅ Optional: update lastMessage based on page name
+                const lastMessageMatch = messageText.match(/\[(.*?)\] (.*)/);
+                if (lastMessageMatch) {
+                    const timestamp = lastMessageMatch[1];
+                    const messageContent = lastMessageMatch[2];
+
+                    // Try to extract the page_name from the messageContent (heuristic)
+                    const possiblePageMatch = messageContent.match(/for (.*?) \((ON|OFF)\)/);
+                    const pageNames = possiblePageMatch ? possiblePageMatch[1].split(',').map(name => name.trim()) : [];
+
+                    pageNames.forEach((pageName) => {
+                        if (pageName) {
+                            setTablePageNameData((prevData) =>
+                                prevData.map((entry) =>
+                                    entry.page_name === pageName
+                                        ? { ...entry, lastMessage: `${timestamp} - ${messageContent}` }
+                                        : entry
+                                )
+                            );
+                        }
+                    });
+                }
+            }
+        } catch (error) {
+            console.error("Error parsing SSE message:", error);
+        }
+    };
+
+    eventSource.onerror = (error) => {
+        console.error("SSE connection error:", error);
+        eventSource.close();
+    };
+
+    eventSourceRef.current = eventSource;
+
+    return () => {
+        if (eventSourceRef.current) {
+            eventSourceRef.current.close();
+        }
+    };
+}, []);
+
+  const handleClearAll = () => {
+    try {
+      setTablePageNameData([]);
+      localStorage.removeItem("tablePageNameData");
+      if (Cookies.get("tablePageNameData")) {
+        Cookies.remove("tablePageNameData");
       }
 
-      // Delay before the next request
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      notify("All data cleared successfully!", "success");
+    } catch (error) {
+      console.error("Error clearing data:", error);
+      notify("Failed to clear data", "error");
     }
-
-    // Add global completion message at the end
-    addMessage([`[${getCurrentTime()}] 🚀 All Requests Sent`]);
   };
 
-  // Handle CSV File Import
-  const handleFileChange = (event) => {
-    const file = event.target.files[0];
-  
-    if (!file) {
-      notify("No file selected.", "error");
-      return;
-    }
-  
-    const { id: user_id } = getUserData(); // Get user ID
-  
-    Papa.parse(file, {
-      complete: (result) => {
-        if (result.data.length < 2) {
-          notify("CSV file is empty or invalid.", "error");
-          return;
-        }
-  
-        const fileHeaders = result.data[0].map((h) => h.trim().toLowerCase());
-  
-        if (!validateCSVHeaders(fileHeaders)) {
-          notify(
-            "Invalid CSV headers. Required: ad_account_id, access_token, page_name, on_off.",
-            "error"
-          );
-          return;
-        }
-  
-        const processedData = result.data
-          .slice(1)
-          .filter((row) => row.some((cell) => cell)) // Remove empty rows
-          .map((row) =>
-            fileHeaders.reduce((acc, header, index) => {
-              acc[header] = row[index] ? row[index].trim() : "";
-              return acc;
-            }, {})
-          );
-  
-        // Detect and remove duplicates
-        const uniqueData = [];
-        const removedDuplicates = [];
-        const seenEntries = new Set();
-  
-        processedData.forEach((entry) => {
-          const adAccountId = entry.ad_account_id;
-          const pageName = entry.page_name;
-          const uniqueKey = `${adAccountId}_${pageName}`; // Track using both fields
-  
-          // Check if the combination already exists
-          if (seenEntries.has(uniqueKey)) {
-            removedDuplicates.push(`ad_account_id: ${adAccountId}, page_name: ${pageName}`);
-            return;
-          }
-  
-          // Check for page_name with different ad_account_id
-          if ([...seenEntries].some((key) => key.endsWith(`_${pageName}`) && !key.startsWith(`${adAccountId}_`))) {
-            removedDuplicates.push(`page_name: ${pageName} with different ad_account_id`);
-            return;
-          }
-  
-          seenEntries.add(uniqueKey);
-          uniqueData.push({ ...entry, status: "Ready" }); // Add default status
-        });
-  
-        if (removedDuplicates.length > 0) {
-          notify(
-            `Removed conflicting or duplicate data: ${removedDuplicates.join(", ")}`,
-            "error"
-          );
-        }
-  
-        // Convert unique data to API request format
-        const requestData = uniqueData.map((entry) => ({
-          ad_account_id: entry.ad_account_id,
-          user_id,
-          access_token: entry.access_token,
-          schedule_data: [
-            {
-              page_name: entry.page_name,
-              on_off: entry.on_off,
-            },
-          ],
-        }));
-  
-        console.log("Processed Request Data:", JSON.stringify(requestData, null, 2));
-  
-        setTablePageNameData(uniqueData); // Store processed data in the table
-        notify("CSV file successfully imported!", "success");
-      },
-      header: false,
-      skipEmptyLines: true,
-    });
-  
-    event.target.value = "";
-  };
-
-  // Download CSV Template
   const handleDownloadTemplate = () => {
     const sampleData = [
       ["ad_account_id", "access_token", "page_name", "on_off"],
-      [
-        "SAMPLE_AD_ACCOUNT_ID",
-        "SAMPLE_ACCESS_TOKEN",
-        "page_name",
-        "ON",
-      ],
-      [
-        "ANOTHER_AD_ACCOUNT",
-        "ANOTHER_ACCESS_TOKEN",
-        "page_name",
-        "ON",
-      ],
+      ["SAMPLE_AD_ACCOUNT_ID", "SAMPLE_ACCESS_TOKEN", "page_name", "ON"],
+      ["ANOTHER_AD_ACCOUNT", "ANOTHER_ACCESS_TOKEN", "page_name", "ON"],
     ];
 
     const csvContent =
@@ -325,7 +315,7 @@ const PageOnOFFPage = () => {
       "data:text/csv;charset=utf-8,\uFEFF" + // UTF-8 BOM for proper encoding
       [csvHeaders.join(",")] // Add headers
         .concat(
-            tablePageNameData.map((row) =>
+          tablePageNameData.map((row) =>
             csvHeaders.map((header) => `"${row[header] || ""}"`).join(",")
           )
         )
@@ -343,135 +333,365 @@ const PageOnOFFPage = () => {
     notify("Data exported successfully!", "success");
   };
 
-  // Handle selected data change from DynamicTable
-  const handleSelectedDataChange = (selectedRows) => {
-    setSelectedData(selectedRows);
+  const handleFileChange = (event) => {
+    const file = event.target.files[0];
+  
+    if (!file) {
+      notify("No file selected.", "error");
+      return;
+    }
+  
+    const { id: user_id } = getUserData(); // Get user ID
+  
+    Papa.parse(file, {
+      complete: (result) => {
+        if (result.data.length < 2) {
+          notify("CSV file is empty or invalid.", "error");
+          return;
+        }
+  
+        const fileHeaders = result.data[0].map((h) => h.trim().toLowerCase());
+  
+        if (!validateCSVHeaders(fileHeaders)) {
+          notify(
+            "Invalid CSV headers. Required: ad_account_id, access_token, page_name, on_off.",
+            "error"
+          );
+          return;
+        }
+  
+        // Process raw data into objects
+        const rawData = result.data
+          .slice(1)
+          .filter((row) => row.some((cell) => cell)) // Remove empty rows
+          .map((row) =>
+            fileHeaders.reduce((acc, header, index) => {
+              acc[header] = row[index] ? row[index].trim() : "";
+              return acc;
+            }, {})
+          );
+  
+        // Step 1: Group by ad_account_id, access_token, and on_off
+        const groupedData = rawData.reduce((acc, current) => {
+          const key = `${current.ad_account_id}_${current.access_token}_${current.on_off}`;
+          
+          if (!acc[key]) {
+            acc[key] = {
+              ad_account_id: current.ad_account_id,
+              access_token: current.access_token,
+              on_off: current.on_off,
+              page_names: new Set(), // Using Set to avoid duplicates
+              originalEntries: []
+            };
+          }
+          
+          // Add page_name to the Set (automatically handles duplicates)
+          acc[key].page_names.add(current.page_name);
+          acc[key].originalEntries.push(current);
+          
+          return acc;
+        }, {});
+  
+        // Step 2: Convert grouped data to final format and handle conflicts
+        const finalData = [];
+        const conflicts = [];
+        const seenPageAccounts = new Set();
+  
+        Object.values(groupedData).forEach(group => {
+          // Check for page_name conflicts (same ad_account_id + access_token + page_name but different on_off)
+          let hasConflict = false;
+          
+          group.originalEntries.forEach(entry => {
+            const pageAccountKey = `${entry.ad_account_id}_${entry.access_token}_${entry.page_name}`;
+            
+            if (seenPageAccounts.has(pageAccountKey)) {
+              // This page_name already exists with a different on_off status
+              hasConflict = true;
+              conflicts.push(
+                `Conflict for ${entry.ad_account_id}: page "${entry.page_name}" has conflicting on/off status`
+              );
+            } else {
+              seenPageAccounts.add(pageAccountKey);
+            }
+          });
+  
+          // Only add to final data if no conflicts
+          if (!hasConflict) {
+            finalData.push({
+              ad_account_id: group.ad_account_id,
+              access_token: group.access_token,
+              page_name: Array.from(group.page_names), // Convert Set to array
+              on_off: group.on_off,
+              status: "Ready"
+            });
+          }
+        });
+  
+        // Show conflict notifications if any
+        if (conflicts.length > 0) {
+          notify(
+            `Found ${conflicts.length} conflicts: ${conflicts.join(", ")}`,
+            "error"
+          );
+        }
+  
+        // Prepare data for verification
+        const requestData = finalData.map((entry) => ({
+          ad_account_id: entry.ad_account_id,
+          user_id,
+          access_token: entry.access_token,
+          schedule_data: [
+            {
+              page_name: entry.page_name, // This is now an array
+              on_off: entry.on_off
+            }
+          ]
+        }));
+  
+        // Update table with the processed data
+        setTablePageNameData(finalData);
+        
+        if (finalData.length > 0) {
+          console.log(
+              "Processed Request Data:",
+              JSON.stringify(requestData, null, 2)
+            );
+          notify("CSV file successfully processed!", "success");
+          verifyAdAccounts(requestData, finalData, addMessage);
+        } else {
+          notify("No valid data to process after conflict resolution", "warning");
+        }
+      },
+      header: false,
+      skipEmptyLines: true,
+    });
+  
+    event.target.value = "";
   };
 
-  useEffect(() => {
+  const handleRunCampaigns = async () => {
+    if (tablePageNameData.length === 0) {
+      addMessage([`[${getCurrentTime()}] ❌ No campaigns to process.`]);
+      return;
+    }
+  
     const { id: user_id } = getUserData();
-    const eventSourceUrl = `${apiUrl}/api/v1/messageevents-pagename?keys=${user_id}-key`;
+  
+    for (let i = 0; i < tablePageNameData.length; i++) {
+      const row = tablePageNameData[i];
+      const { ad_account_id, access_token, page_name, on_off } = row;
+  
+      const requestData = [
+        {
+          ad_account_id,
+          user_id,
+          access_token,
+          schedule_data: [
+            {
+              page_name: Array.isArray(page_name) ? page_name : [page_name],
+              on_off,
+            },
+          ],
+        },
+      ];
+  
+      try {
+        addMessage([
+          `[${getCurrentTime()}] ⏳ Processing campaign for page: ${page_name}`,
+        ]);
+  
+        const response = await fetch(`${apiUrl}/api/v1/onoff/pagename`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            skip_zrok_interstitial: "true",
+          },
+          body: JSON.stringify(requestData),
+        });
+  
+        if (!response.ok) {
+          throw new Error(`Request failed with status ${response.status}`);
+        }
+  
+        // Optional: parse if backend returns something
+        const responseData = await response.json();
+  
+        setTablePageNameData(prevData =>
+          prevData.map((item, index) =>
+            index === i
+              ? {
+                  ...item,
+                  status: `Success ✅ (${on_off.toUpperCase()})`,
+                }
+              : item
+          )
+        );
+  
+        addMessage([
+          `[${getCurrentTime()}] ✅ Campaign processed for ${page_name}.`,
+        ]);
+  
+        // Optional delay
+        // await new Promise(resolve => setTimeout(resolve, 5000));
+  
+      } catch (error) {
+        setTablePageNameData(prevData =>
+          prevData.map((item, index) =>
+            index === i
+              ? {
+                  ...item,
+                  status: `Error ❌ (${error.message})`,
+                }
+              : item
+          )
+        );
+  
+        addMessage([
+          `[${getCurrentTime()}] ❌ Error for ${page_name}: ${error.message}`,
+        ]);
+      }
+    }
+  };
 
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close(); // Close any existing SSE connection
+  // Validate CSV Headers
+  const validateCSVHeaders = (fileHeaders) =>
+    REQUIRED_HEADERS.every((header) => fileHeaders.includes(header));
+
+  const statusRenderers = {
+    ad_account_status: (value, row) => (
+      <StatusWithIcon status={value} error={row?.ad_account_error} />
+    ),
+    access_token_status: (value, row) => (
+      <StatusWithIcon status={value} error={row?.access_token_error} />
+    ),
+    status: (value, row) => (
+      <StatusWithIcon
+        status={value}
+        error={[row?.ad_account_error, row?.access_token_error]
+          .filter(Boolean)
+          .join("\n")}
+      />
+    ),
+    page_name: (value) => {
+      const displayValue = Array.isArray(value) ? value.join(", ") : value;
+      const tooltipValue = Array.isArray(value) ? value.join(", \n") : value;
+      
+      return (
+        <Tooltip 
+          title={
+            <span style={{ whiteSpace: 'pre-line' }}> {/* Ensures new lines render */}
+              {tooltipValue}
+            </span>
+          }
+          placement="top"
+          arrow
+          enterDelay={300}
+        >
+          <span style={{ 
+            cursor: 'pointer',
+            textUnderlineOffset: '3px'
+          }}>
+            {displayValue}
+          </span>
+        </Tooltip>
+      );
+    },
+  };
+
+  const StatusWithIcon = ({ status, error }) => {
+    if (!status) return null;
+
+    if (status === "Verified") {
+      return <CheckIcon style={{ color: "green" }} />;
     }
 
-    const eventSource = new EventSource(eventSourceUrl, {
-      headers: {
-        "ngrok-skip-browser-warning": "true",
-        skip_zrok_interstitial: "true",
-      },
-      retry: 1500, // Auto-retry every 1.5s on failure
+    if (status === "Not Verified") {
+      return error ? (
+        <Tooltip title={error}>
+          <CancelIcon style={{ color: "red" }} />
+        </Tooltip>
+      ) : (
+        <CancelIcon style={{ color: "red" }} />
+      );
+    }
+
+    return <span>{status}</span>;
+  };
+
+  const compareCsvWithJson = (csvData, jsonData, setTablePageNameData) => {
+    const updatedData = csvData.map((csvRow) => {
+      const jsonRow = jsonData.find(
+        (json) =>
+          json.ad_account_id === csvRow.ad_account_id &&
+          json.access_token === csvRow.access_token
+      );
+
+      if (!jsonRow) {
+        return {
+          ...csvRow,
+          ad_account_status: "Not Verified",
+          access_token_status: "Not Verified",
+          status: "Not Verified",
+          ad_account_error: "Account not found",
+          access_token_error: "Account not found",
+        };
+      }
+
+      return {
+        ...csvRow,
+        ad_account_status: jsonRow.ad_account_status,
+        access_token_status: jsonRow.access_token_status,
+        status:
+          jsonRow.ad_account_status === "Verified" &&
+          jsonRow.access_token_status === "Verified"
+            ? "Verified"
+            : "Not Verified",
+        ad_account_error: jsonRow.ad_account_error || null,
+        access_token_error: jsonRow.access_token_error || null,
+      };
     });
 
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data && data.data && data.data.message) {
-          const messageText = data.data.message[0]; // ✅ Extract first message
+    setTablePageNameData(updatedData);
+  };
 
-          // ✅ Always add the message to the message list
-          addMessage(data.data.message);
+  const verifyAdAccounts = async (
+    campaignsData,
+    originalCsvData,
+    addMessage
+  ) => {
+    try {
+      const response = await fetch(`${apiUrl}/api/v1/verify/pagename`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          skip_zrok_interstitial: "true",
+        },
+        body: JSON.stringify(campaignsData),
+      });
 
-          // ✅ Check if it's a "Last Message"
-          const lastMessageMatch = messageText.match(/\[(.*?)\] (.*)/);
+      const result = await response.json();
+      console.log("Verification Result:", JSON.stringify(result, null, 2));
 
-          if (lastMessageMatch) {
-            const timestamp = lastMessageMatch[1]; // e.g., "2025-03-13 11:34:03"
-            const messageContent = lastMessageMatch[2]; // e.g., "Campaign updates completed for 1152674286244491 (OFF)"
-
-            setTablePageNameData((prevData) =>
-              prevData.map((entry) =>
-                entry.key === `${user_id}-key`
-                  ? {
-                      ...entry,
-                      lastMessage: `${timestamp} - ${messageContent}`,
-                    }
-                  : entry
-              )
-            );
-          }
-
-          // ✅ Handle "Fetching Campaign Data for {ad_account_id} ({operation})"
-          const fetchingMatch = messageText.match(
-            /\[(.*?)\] Fetching Campaign Data for (\S+) \((ON|OFF)\), schedule (.+)/
-          );
-
-          if (fetchingMatch) {
-            const adAccountId = fetchingMatch[2];
-            const onOffStatus = fetchingMatch[3];
-
-            setTablePageNameData((prevData) =>
-              prevData.map((entry) =>
-                entry.ad_account_id === adAccountId &&
-                entry.on_off === onOffStatus
-                  ? { ...entry, status: "Fetching ⏳" }
-                  : entry
-              )
-            );
-          }
-
-          // ✅ Handle "Campaign updates completed"
-          const successMatch = messageText.match(
-            /\[(.*?)\] Campaign updates completed for (\S+) \((ON|OFF)\)/
-          );
-
-          if (successMatch) {
-            const adAccountId = successMatch[2];
-            const onOffStatus = successMatch[3];
-
-            setTablePageNameData((prevData) =>
-              prevData.map((entry) =>
-                entry.ad_account_id === adAccountId &&
-                entry.on_off === onOffStatus
-                  ? { ...entry, status: `Success ✅` }
-                  : entry
-              )
-            );
-          }
-
-          // ❌ Handle 401 Unauthorized error
-          const unauthorizedMatch = messageText.match(
-            /Error during campaign fetch for Ad Account (\S+) \((ON|OFF)\): 401 Client Error/
-          );
-
-          if (unauthorizedMatch) {
-            const adAccountId = unauthorizedMatch[1];
-            const onOffStatus = unauthorizedMatch[2];
-
-            setTablePageNameData((prevData) =>
-              prevData.map((entry) =>
-                entry.ad_account_id === adAccountId &&
-                entry.on_off === onOffStatus
-                  ? { ...entry, status: "Failed ❌" }
-                  : entry
-              )
-            );
-          }
-        }
-      } catch (error) {
-        console.error("Error parsing SSE message:", error);
+      if (response.ok && result.verified_accounts) {
+        compareCsvWithJson(
+          originalCsvData,
+          result.verified_accounts,
+          setTablePageNameData
+        );
+        addMessage([
+          `[${getCurrentTime()}] Verification completed for ${
+            result.verified_accounts.length
+          } accounts`,
+        ]);
+      } else {
+        const errorMsg =
+          result.message || "No verified accounts returned from API";
+        addMessage([`⚠️ ${errorMsg}`]);
       }
-    };
-
-    eventSource.onerror = (error) => {
-      console.error("SSE connection error:", error);
-      eventSource.close();
-    };
-
-    eventSourceRef.current = eventSource;
-
-    return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
-    };
-  }, []);
-
-  const handleClearAll = () => {
-    setTablePageNameData([]); // Clear state
-    Cookies.remove("tablePageNameData"); // Remove from cookies
-    notify("All data cleared successfully!", "success");
+    } catch (error) {
+      console.error("Error verifying ad accounts:", error);
+      addMessage([`❌ Failed to verify ad accounts: ${error.message}`]);
+    }
   };
 
   return (
@@ -500,7 +720,7 @@ const PageOnOFFPage = () => {
           }}
         >
           <Typography variant="h5" gutterBottom>
-            ON/OFF CAMPAIGNS PAGE
+            ON/OFF PAGENAME
           </Typography>
           <Box sx={{ flex: 1 }} /> {/* Spacer */}
           <Box
@@ -559,7 +779,7 @@ const PageOnOFFPage = () => {
 
       {/* Second Row (Dynamic Table) */}
       <Box sx={{ flex: 1 }}>
-        <WidgetCard title="Main Section" height="100%">
+        <WidgetCard title="Main Section" height="83.1%">
           <DynamicTable
             headers={headers}
             data={tablePageNameData}
@@ -570,11 +790,12 @@ const PageOnOFFPage = () => {
               marginTop: "8px",
               textAlign: "center",
             }}
+            customRenderers={statusRenderers}
             onDataChange={setTablePageNameData}
             onSelectedChange={handleSelectedDataChange} // Pass selection handler
             nonEditableHeaders={[
-              "ad_account_id",
-              "access_token",
+              "ad_account_status",
+              "access_token_status",
               "page_name",
               "status",
             ]}
