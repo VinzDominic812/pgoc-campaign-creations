@@ -120,11 +120,12 @@ const CreateOnOFFPage = () => {
 
       try {
         const response = await fetch(
-          `${apiUrl}/api/v1/onoff/campaigns`,
+          `${apiUrl}/api/v1/off-on-campaign/add-campaigns`,
           {
             method: "POST",
             headers: {
-              "Content-Type": "application/json", 
+              "Content-Type": "application/json",
+              skip_zrok_interstitial: "true",
             },
             body: JSON.stringify(data),
           }
@@ -359,7 +360,8 @@ const CreateOnOFFPage = () => {
 
     const eventSource = new EventSource(eventSourceUrl, {
       headers: {
-        "ngrok-skip-browser-warning": "true", 
+        "ngrok-skip-browser-warning": "true",
+        skip_zrok_interstitial: "true",
       },
       retry: 1500, // Auto-retry every 1.5s on failure
     });
@@ -382,7 +384,7 @@ const CreateOnOFFPage = () => {
 
             setTableData((prevData) =>
               prevData.map((entry) =>
-                entry.key === "1-key"
+                entry.key === `${user_id}-key`
                   ? {
                       ...entry,
                       lastMessage: `${timestamp} - ${messageContent}`,
@@ -559,7 +561,7 @@ const CreateOnOFFPage = () => {
 
       {/* Second Row (Dynamic Table) */}
       <Box sx={{ flex: 1 }}>
-        <WidgetCard title="Main Section" height="100%">
+        <WidgetCard title="Main Section" height="83.1%">
           <DynamicTable
             headers={headers}
             data={tableData}

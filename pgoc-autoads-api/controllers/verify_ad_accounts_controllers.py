@@ -81,7 +81,7 @@ def verify_ad_accounts(data):
             # Verify ad account access
             ad_account_verified, ad_account_error = get_ad_accounts(ad_account_id, access_token)
             ad_account_status = "Verified" if ad_account_verified else "Not Verified"
-            ad_account_error = None if ad_account_verified else ad_account_error
+            ad_account_error = None if ad_account_status == "Verified" else "Ad account not associated with this access token"
 
             # Verify Facebook page access
             facebook_page_verified, facebook_page_error, page_name = get_facebook_pages(facebook_page_id, access_token)
